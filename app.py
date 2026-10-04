@@ -65,11 +65,31 @@ with tab1:
         try:
             if uploaded_file.name.endswith('csv'):
                 raw_df = pd.read_csv(uploaded_file, header=None, low_memory=False)
+                offer_grouped = pd.DataFrame(columns=['SKU', 'Offer_Amount'])
             else:
                 try:
                     raw_df = pd.read_excel(uploaded_file, sheet_name='SKU-level P&L', header=None)
                 except ValueError:
                     raw_df = pd.read_excel(uploaded_file, sheet_name=1, header=None)
+                
+                # Extract Offer Amount from Orders P&L (Sheet 3)
+                try:
+                    orders_df = pd.read_excel(uploaded_file, sheet_name='Orders P&L', header=None)
+                except ValueError:
+                    try:
+                        orders_df = pd.read_excel(uploaded_file, sheet_name=2, header=None)
+                    except Exception:
+                        orders_df = pd.DataFrame()
+                        
+                if not orders_df.empty and len(orders_df.columns) >= 26:
+                    orders_extracted = orders_df.iloc[:, [3, 25]].copy() # 3 is D (SKU), 25 is Z (Offer Amount)
+                    orders_extracted.columns = ['SKU', 'Offer_Amount']
+                    orders_extracted = orders_extracted.dropna(subset=['SKU'])
+                    orders_extracted = orders_extracted[~orders_extracted['SKU'].astype(str).str.contains("SKU Name|SKU ID|None|nan", case=False, na=False)]
+                    orders_extracted['Offer_Amount'] = pd.to_numeric(orders_extracted['Offer_Amount'], errors='coerce').fillna(0)
+                    offer_grouped = orders_extracted.groupby('SKU', as_index=False)['Offer_Amount'].sum()
+                else:
+                    offer_grouped = pd.DataFrame(columns=['SKU', 'Offer_Amount'])
             
             idx_sku = letter_to_index(COL_SKU)
             idx_units = letter_to_index(COL_NET_UNITS)
@@ -84,6 +104,10 @@ with tab1:
             
             for col in ['Net_Units', 'Customer_Returns', 'Bank_Settlement']:
                 input_df[col] = pd.to_numeric(input_df[col], errors='coerce').fillna(0)
+                
+            # Merge Offer Amount into main input data
+            input_df = pd.merge(input_df, offer_grouped, on='SKU', how='left')
+            input_df['Offer_Amount'] = input_df['Offer_Amount'].fillna(0)
             
             if st.button("🚀 Generate Product-Wise Report"):
                 current_master = pd.read_csv(MASTER_FILE)
@@ -104,17 +128,22 @@ with tab1:
                         'Profit': 'sum',
                         'Total_Cost': 'sum',
                         'Bank_Settlement': 'sum',
+                        'Offer_Amount': 'sum',
                         'Net_Units': 'sum',
                         'Customer_Returns': 'sum'
                     }).reset_index()
+                    
+                    report['Total_Units'] = report['Net_Units'] + report['Customer_Returns']
                     
                     report.rename(columns={
                         'Product': 'Row Labels',
                         'Profit': 'Sum of Profit',
                         'Total_Cost': 'Sum of Total Cost',
                         'Bank_Settlement': 'Sum of Bank Settlement',
+                        'Offer_Amount': 'Sum of Offer Amount',
                         'Net_Units': 'Sum of Net Units',
-                        'Customer_Returns': 'Sum of Customer Returns'
+                        'Customer_Returns': 'Sum of Customer Returns',
+                        'Total_Units': 'Total Units'
                     }, inplace=True)
                     
                     # ---------------------------------------------------------
@@ -122,7 +151,7 @@ with tab1:
                     # ---------------------------------------------------------
                     report.sort_values(by='Sum of Profit', ascending=True, inplace=True)
                     
-                    numeric_cols = ['Sum of Profit', 'Sum of Total Cost', 'Sum of Bank Settlement', 'Sum of Net Units', 'Sum of Customer Returns']
+                    numeric_cols = ['Sum of Profit', 'Sum of Total Cost', 'Sum of Bank Settlement', 'Sum of Offer Amount', 'Sum of Net Units', 'Sum of Customer Returns', 'Total Units']
                     report[numeric_cols] = report[numeric_cols].round(0).astype(int)
                     
                     totals = report[numeric_cols].sum()
@@ -134,8 +163,9 @@ with tab1:
                         axis=1
                     )
                     
+                    # Amended to calculate Return % from Total Units instead of Net Units
                     report['Return %'] = report.apply(
-                        lambda row: f"{(row['Sum of Customer Returns'] / row['Sum of Net Units'] * 100):.1f}%" if row['Sum of Net Units'] > 0 else "0.0%", 
+                        lambda row: f"{(row['Sum of Customer Returns'] / row['Total Units'] * 100):.1f}%" if row['Total Units'] > 0 else "0.0%", 
                         axis=1
                     )
                     
@@ -145,7 +175,7 @@ with tab1:
                     side_table = report.iloc[1:].copy()
                     
                     side_table['Raw_Return'] = side_table.apply(
-                        lambda row: (row['Sum of Customer Returns'] / row['Sum of Net Units'] * 100) if row['Sum of Net Units'] > 0 else 0.0, 
+                        lambda row: (row['Sum of Customer Returns'] / row['Total Units'] * 100) if row['Total Units'] > 0 else 0.0, 
                         axis=1
                     )
                     
@@ -199,7 +229,7 @@ with tab1:
                         st.dataframe(side_table, use_container_width=True)
 
                     # ---------------------------------------------------------
-                    # CATEGORY PIE CHARTS (With Values in Thousands)
+                    # CATEGORY PIE CHARTS (With Values)
                     # ---------------------------------------------------------
                     if 'Category' in merged_df.columns:
                         st.markdown("---")
@@ -210,7 +240,6 @@ with tab1:
                             'Profit': 'sum'
                         }).reset_index()
                         
-                        # Convert absolute values to thousands
                         cat_df['Sales_in_k'] = cat_df['Bank_Settlement'] / 1000
                         cat_df['Profit_in_k'] = cat_df['Profit'] / 1000
                         
@@ -224,7 +253,6 @@ with tab1:
                                 title="Category-Wise Sales (in '000s)",
                                 hole=0.3
                             )
-                            # Custom template: shows value to 2 decimal places and the percentage
                             fig_sales.update_traces(texttemplate="%{value:.2f}<br>(%{percent})")
                             st.plotly_chart(fig_sales, use_container_width=True)
                             
@@ -237,11 +265,9 @@ with tab1:
                                 title="Category-Wise Profit (in '000s)",
                                 hole=0.3
                             )
-                            # Custom template: shows value to 2 decimal places and the percentage
                             fig_profit.update_traces(texttemplate="%{value:.2f}<br>(%{percent})")
                             st.plotly_chart(fig_profit, use_container_width=True)
                             
-                            # Safely draw the caption directly in the website layout below the chart
                             st.caption("*Categories with net losses are excluded from this chart.")
                         
         except Exception as e:
